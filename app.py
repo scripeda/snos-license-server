@@ -4,7 +4,6 @@ import datetime
 from datetime import timedelta
 import secrets
 import os
-import sys
 
 app = Flask(__name__)
 
@@ -27,7 +26,6 @@ class LicenseDatabase:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Таблица лицензий
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS licenses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +40,6 @@ class LicenseDatabase:
             )
         ''')
         
-        # Таблица активаций
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS activations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,7 +225,6 @@ db = LicenseDatabase()
 
 @app.route('/')
 def home():
-    """Главная страница"""
     return jsonify({
         'service': 'SnosByDrxe License Server',
         'status': 'running',
@@ -238,13 +234,19 @@ def home():
             'check': '/api/check',
             'generate': '/api/generate (requires API_KEY)',
             'licenses': '/api/licenses (requires ADMIN_KEY)',
-            'reset': '/api/reset (requires ADMIN_KEY)'
-        }
+            'reset': '/api/reset (requires ADMIN_KEY)',
+            'revoke': '/api/revoke (requires ADMIN_KEY)',
+            'update': '/api/update (requires ADMIN_KEY)'
+        },
+        'test_keys': [
+            'SNOS-TEST-7D3F9A2B5C8E (30 дней, много активаций)',
+            'SNOS-ETERNAL-ABCDEF123456 (вечная, 1 активация)',
+            'SNOS-DEMO-123456789ABC (7 дней, 3 активации)'
+        ]
     })
 
 @app.route('/api/test', methods=['GET'])
 def test_endpoint():
-    """Проверка работы сервера"""
     return jsonify({
         'status': 'ok',
         'server_time': datetime.datetime.now().isoformat(),
@@ -254,7 +256,6 @@ def test_endpoint():
 
 @app.route('/api/activate', methods=['POST'])
 def activate():
-    """Активация лицензии"""
     try:
         data = request.get_json()
         if not data:
@@ -278,7 +279,6 @@ def activate():
 
 @app.route('/api/check', methods=['POST'])
 def check():
-    """Проверка лицензии"""
     try:
         data = request.get_json()
         if not data:
@@ -356,7 +356,7 @@ def reset():
     try:
         data = request.get_json()
         if not data:
-            return jsonify({'error': 'No JSON data provided'}), 400
+            return jsonify({'error': 'No JSON data предоставлен'}), 400
         
         license_key = data.get('license_key')
         if not license_key:
@@ -367,6 +367,90 @@ def reset():
         return jsonify({
             'success': success,
             'message': message
+        })
+    except Exception as e:
+        return jsonify({'error': f'Error: {str(e)}'}), 500
+
+@app.route('/api/revoke', methods=['POST'])
+def revoke():
+    """Отзыв лицензии (требует админский ключ)"""
+    auth_key = request.headers.get('X-Auth-Key')
+    if auth_key != ADMIN_KEY:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        license_key = data.get('license_key')
+        if not license_key:
+            return jsonify({'error': 'Missing license_key'}), 400
+        
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE licenses SET is_active = 0 WHERE license_key = ?', (license_key,))
+        conn.commit()
+        success = cursor.rowcount > 0
+        conn.close()
+        
+        return jsonify({
+            'success': success,
+            'message': 'License revoked' if success else 'License not found'
+        })
+    except Exception as e:
+        return jsonify({'error': f'Error: {str(e)}'}), 500
+
+@app.route('/api/update', methods=['POST'])
+def update():
+    """Обновление параметров лицензии (требует админский ключ)"""
+    auth_key = request.headers.get('X-Auth-Key')
+    if auth_key != ADMIN_KEY:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    try:
+        data = request.get_json()
+        license_key = data.get('license_key')
+        days = data.get('days')
+        max_activations = data.get('max_activations')
+        
+        if not license_key:
+            return jsonify({'error': 'Missing license_key'}), 400
+        
+        if days is None and max_activations is None:
+            return jsonify({'error': 'No parameters to update'}), 400
+        
+        updates = []
+        params = []
+        
+        if days is not None:
+            if days == 0:
+                updates.append("expires_at = NULL")
+            else:
+                expires_at = datetime.datetime.now() + timedelta(days=days)
+                updates.append("expires_at = ?")
+                params.append(expires_at)
+        
+        if max_activations is not None:
+            updates.append("max_activations = ?")
+            params.append(max_activations)
+        
+        if not updates:
+            return jsonify({'error': 'No parameters to update'}), 400
+        
+        params.append(license_key)
+        
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        sql = f"UPDATE licenses SET {', '.join(updates)} WHERE license_key = ?"
+        cursor.execute(sql, params)
+        conn.commit()
+        updated = cursor.rowcount > 0
+        conn.close()
+        
+        return jsonify({
+            'success': updated,
+            'message': 'License updated' if updated else 'License not found'
         })
     except Exception as e:
         return jsonify({'error': f'Error: {str(e)}'}), 500
